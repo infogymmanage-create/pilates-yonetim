@@ -47,6 +47,7 @@ function seedDB() {
 
 function migrateDB(d) {
   if (!d.studio) d.studio = { name: "Reformer Pilates Stüdyosu", address: "", lat: null, lng: null, radius: 150 };
+  if (!d.lastAutoBackup) d.lastAutoBackup = null;
   if (!Array.isArray(d.staff)) d.staff = [];
   if (!Array.isArray(d.members)) d.members = [];
   if (!Array.isArray(d.packages)) d.packages = [];
@@ -63,6 +64,7 @@ function migrateDB(d) {
   if (!d.leaveRecords) d.leaveRecords = [];
   if (!d.notes) d.notes = [];
   if (!d.deletionRequests) d.deletionRequests = [];
+  if (!Array.isArray(d.spotAlerts)) d.spotAlerts = [];
   if (!d.activityLog) d.activityLog = [];
   if (!d.taskDefinitions) d.taskDefinitions = [{ id: uid(), name: "Üye Fotoğrafı Gönderimi" }, { id: uid(), name: "Üye Videosu Gönderimi" }];
   if (!d.taskLogs) d.taskLogs = [];
@@ -107,6 +109,25 @@ function requestDeletion(mutate, currentUser, type, payload, description) {
   if (typeof window !== "undefined" && window.alert) window.alert("Silme talebi yöneticiye gönderildi, onay bekleniyor.");
 }
 
+// Bir derste yer açıldığında bekleme listesindeki üyeyi OTOMATİK almak yerine
+// bir bildirim oluşturur — kadroya alma kararı personelde kalır.
+function notifySpotOpened(d, classObj, members) {
+  if (classObj.memberIds.length < classObj.capacity && classObj.waitlistIds.length > 0) {
+    const waitingMember = members.find((m) => m.id === classObj.waitlistIds[0]);
+    d.spotAlerts = d.spotAlerts || [];
+    d.spotAlerts.push({
+      id: uid(),
+      classId: classObj.id,
+      classTitle: classObj.title,
+      dayOfWeek: classObj.dayOfWeek,
+      timeSlot: classObj.timeSlot,
+      waitlistMemberId: classObj.waitlistIds[0],
+      waitlistMemberName: waitingMember?.name || "Bilinmeyen üye",
+      createdAt: new Date().toISOString(),
+    });
+  }
+}
+
 function memberStatus(m, today) {
   const t = today || todayISO();
   if (m.freeze && t >= m.freeze.startDate && t <= m.freeze.endDate) return "frozen";
@@ -130,10 +151,21 @@ async function loadDB() {
 }
 async function saveDB(db) {
   try {
-    await supabase.from("app_state").update({ data: db, updated_at: new Date().toISOString() }).eq("id", 1);
+    const { error } = await supabase.from("app_state").update({ data: db, updated_at: new Date().toISOString() }).eq("id", 1);
+    if (error) throw error;
+    return true;
   } catch (e) {
     console.error("Kayıt hatası", e);
+    return false;
   }
+}
+async function attemptMutation(updater) {
+  let latest = await loadDB();
+  latest = latest ? migrateDB(latest) : seedDB();
+  const draft = JSON.parse(JSON.stringify(latest));
+  const next = updater(draft) || draft;
+  const ok = await saveDB(next);
+  return { ok, next };
 }
 
 function distanceMeters(lat1, lon1, lat2, lon2) {
@@ -563,6 +595,27 @@ function CelebrationsCard({ db }) {
   );
 }
 
+function SpotAlertsCard({ db, mutate }) {
+  const alerts = db.spotAlerts || [];
+  if (alerts.length === 0) return null;
+  const dismiss = (id) => mutate((d) => { d.spotAlerts = (d.spotAlerts || []).filter((a) => a.id !== id); return d; });
+  return (
+    <div className="card-surface rounded-2xl p-4" style={{ borderLeft: "3px solid #2F6F8F" }}>
+      <p className="text-sm font-semibold mb-3 flex items-center gap-1.5"><RefreshCcw size={15} className="text-[#2F6F8F]" /> Derste Yer Açıldı ({alerts.length})</p>
+      <div className="flex flex-col gap-2">
+        {alerts.map((a) => (
+          <div key={a.id} className="flex items-center justify-between gap-2 flex-wrap bg-[#E4EEF2] rounded-xl p-2.5">
+            <p className="text-sm">
+              <b>{a.classTitle}</b> ({WEEKDAYS[a.dayOfWeek]} {a.timeSlot}) — bekleme listesinde <b>{a.waitlistMemberName}</b> var, kadroya almak ister misin?
+            </p>
+            <button onClick={() => dismiss(a.id)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg shrink-0" style={{ background: "#FCFAF4", color: "#2F6F8F" }}>Gördüm</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AlertsCard({ db }) {
   const lowSessions = db.members.filter((m) => m.active && db.packages.some((p) => p.memberId === m.id && p.remainingSessions > 0 && p.remainingSessions <= 2));
   const inactive = db.members.filter((m) => {
@@ -635,7 +688,7 @@ function PendingDeletionsCard({ db, mutate, currentUser }) {
         if (c) {
           c.memberIds = c.memberIds.filter((id) => id !== req.payload.memberId);
           c.waitlistIds = c.waitlistIds.filter((id) => id !== req.payload.memberId);
-          if (c.memberIds.length < c.capacity && c.waitlistIds.length > 0) c.memberIds.push(c.waitlistIds.shift());
+          notifySpotOpened(d, c, d.members);
         }
       } else if (req.type === "classDelete") {
         d.classes = d.classes.filter((c) => c.id !== req.payload.classId);
@@ -799,6 +852,7 @@ function OverviewTab({ db, mutate, isAdmin, currentUser, setActiveTab }) {
       </div>
 
       {isAdmin && <PendingDeletionsCard db={db} mutate={mutate} currentUser={currentUser} />}
+      {isAdmin && <SpotAlertsCard db={db} mutate={mutate} />}
       <NotesCard db={db} mutate={mutate} currentUser={currentUser} isAdmin={isAdmin} />
       <CelebrationsCard db={db} />
       <AlertsCard db={db} />
@@ -1765,9 +1819,7 @@ function ClassDetailModal({ cls, db, mutate, isAdmin, currentUser, onClose }) {
       if (!c) return d;
       c.memberIds = c.memberIds.filter((id) => id !== memberId);
       c.waitlistIds = c.waitlistIds.filter((id) => id !== memberId);
-      if (c.memberIds.length < c.capacity && c.waitlistIds.length > 0) {
-        c.memberIds.push(c.waitlistIds.shift());
-      }
+      notifySpotOpened(d, c, d.members);
       const member = db.members.find((m) => m.id === memberId);
       logActivity(d, currentUser, `${member?.name || "Üye"} "${cls.title}" dersinden çıkarıldı`);
       return d;
@@ -1779,6 +1831,18 @@ function ClassDetailModal({ cls, db, mutate, isAdmin, currentUser, onClose }) {
     const member = db.members.find((m) => m.id === memberId);
     requestDeletion(mutate, currentUser, "classMember", { classId: cls.id, memberId }, `${member?.name || "Üye"} adlı üyenin "${cls.title}" dersinden çıkarılması`);
   };
+  const promoteFromWaitlist = (memberId) => {
+    mutate((d) => {
+      const c = d.classes.find((x) => x.id === cls.id);
+      if (!c || c.memberIds.length >= c.capacity) return d;
+      c.waitlistIds = c.waitlistIds.filter((id) => id !== memberId);
+      c.memberIds.push(memberId);
+      d.spotAlerts = (d.spotAlerts || []).filter((a) => !(a.classId === c.id && a.waitlistMemberId === memberId));
+      const member = db.members.find((m) => m.id === memberId);
+      logActivity(d, currentUser, `${member?.name || "Üye"} bekleme listesinden "${cls.title}" kadrosuna alındı`);
+      return d;
+    });
+  };
   const moveMember = (memberId, targetClassId) => {
     if (!targetClassId) return;
     mutate((d) => {
@@ -1787,7 +1851,7 @@ function ClassDetailModal({ cls, db, mutate, isAdmin, currentUser, onClose }) {
       if (!from || !to) return d;
       from.memberIds = from.memberIds.filter((id) => id !== memberId);
       from.waitlistIds = from.waitlistIds.filter((id) => id !== memberId);
-      if (from.memberIds.length < from.capacity && from.waitlistIds.length > 0) from.memberIds.push(from.waitlistIds.shift());
+      notifySpotOpened(d, from, d.members);
       if (!to.memberIds.includes(memberId) && !to.waitlistIds.includes(memberId)) {
         if (to.memberIds.length < to.capacity) to.memberIds.push(memberId);
         else to.waitlistIds.push(memberId);
@@ -1877,7 +1941,10 @@ function ClassDetailModal({ cls, db, mutate, isAdmin, currentUser, onClose }) {
               {waitlist.map((m) => (
                 <span key={m.id} className="text-xs rounded-full px-2.5 py-1 flex items-center gap-1.5" style={{ background: "#F5EDDA", color: "#A98330" }}>
                   {m.name}
-                  {canManageRoster && <button onClick={() => handleRemove(m.id)} className="hover:text-[#B14A3A]"><X size={11} /></button>}
+                  {canManageRoster && roster.length < cls.capacity && (
+                    <button onClick={() => promoteFromWaitlist(m.id)} title="Kadroya Al" className="hover:text-[#3E6B52]"><Check size={11} /></button>
+                  )}
+                  {canManageRoster && <button onClick={() => handleRemove(m.id)} title="Listeden Çıkar" className="hover:text-[#B14A3A]"><X size={11} /></button>}
                 </span>
               ))}
             </div>
@@ -2929,6 +2996,30 @@ function ReportsTab({ db }) {
     return totalRemaining === 0 && daysSince > 30;
   });
 
+  const packagesByType = useMemo(() => {
+    const map = {};
+    db.packages.forEach((p) => {
+      if (!p.purchaseDate || p.purchaseDate.slice(0, 7) !== month) return;
+      const t = p.serviceType || "Reformer Pilates";
+      if (!map[t]) map[t] = { count: 0, revenue: 0 };
+      map[t].count += 1;
+      map[t].revenue += p.totalPrice;
+    });
+    return Object.entries(map).map(([type, v]) => ({ type, ...v })).sort((a, b) => b.revenue - a.revenue);
+  }, [db.packages, month]);
+
+  const sessionsByInstructor = useMemo(() => {
+    const map = {};
+    db.attendance.forEach((a) => {
+      if (a.date.slice(0, 7) !== month) return;
+      if (a.status !== "attended" && a.status !== "burned") return;
+      const ins = db.staff.find((s) => s.id === a.instructorId);
+      const name = ins?.name || "Bilinmeyen";
+      map[name] = (map[name] || 0) + 1;
+    });
+    return Object.entries(map).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+  }, [db.attendance, db.staff, month]);
+
   const exportMonthlyReport = () => {
     const wb = XLSX.utils.book_new();
     const income = db.packages.flatMap((p) => (p.payments || [])
@@ -2979,18 +3070,109 @@ function ReportsTab({ db }) {
       </div>
 
       <div className="card-surface rounded-2xl p-4 flex flex-col gap-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <p className="text-sm font-semibold">Dönem</p>
+          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="!w-auto" />
+        </div>
+      </div>
+
+      <div className="card-surface rounded-2xl p-4">
+        <p className="text-sm font-semibold mb-1">Paket Türüne Göre Satış</p>
+        <p className="text-xs text-[#8B8168] mb-3">Seçilen ay içinde satın alınan paketler, türüne göre gruplanmış.</p>
+        {packagesByType.length === 0 ? <p className="text-sm text-[#8B8168]">Bu ay paket satışı yok.</p> : (
+          <div className="flex flex-col gap-1.5">
+            {packagesByType.map((row) => (
+              <div key={row.type} className="flex items-center justify-between text-sm">
+                <span>{row.type}</span>
+                <span className="font-mono text-xs text-[#8B8168]">{row.count} paket · {fmtMoney(row.revenue)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card-surface rounded-2xl p-4">
+        <p className="text-sm font-semibold mb-1">Hoca Başına Seans Sayısı</p>
+        <p className="text-xs text-[#8B8168] mb-3">Seçilen ay içinde her hocanın yaptırdığı (Geldi/Gelmedi işaretlenen) seans sayısı — bir iş yükü/performans göstergesi. Gelir, paketler üyeye bağlı kaydedildiği için hoca bazında kesin olarak ayrıştırılamıyor.</p>
+        {sessionsByInstructor.length === 0 ? <p className="text-sm text-[#8B8168]">Bu ay yoklama kaydı yok.</p> : (
+          <div className="flex flex-col gap-1.5">
+            {sessionsByInstructor.map((row) => (
+              <div key={row.name} className="flex items-center justify-between text-sm">
+                <span>{row.name}</span>
+                <span className="font-mono text-xs text-[#8B8168]">{row.count} seans</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card-surface rounded-2xl p-4 flex flex-col gap-3">
         <p className="text-sm font-semibold flex items-center gap-1.5"><FileSpreadsheet size={15} /> Aylık Rapor İndir</p>
         <div className="flex items-center gap-2 flex-wrap">
-          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="!w-auto" />
           <button onClick={exportMonthlyReport} className="btn-clay px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2"><Download size={15} /> Excel İndir</button>
         </div>
-        <p className="text-xs text-[#8B8168]">Gelir, gider, yoklama ve yeni üye verilerini içeren .xlsx dosyası indirilir.</p>
+        <p className="text-xs text-[#8B8168]">Yukarıda seçtiğin dönem için gelir, gider, yoklama ve yeni üye verilerini içeren .xlsx dosyası indirilir.</p>
       </div>
     </div>
   );
 }
 
 /* ============================= AYARLAR (ADMIN) ============================= */
+
+function AutoBackupsList({ db }) {
+  const [backups, setBackups] = useState(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data, error: err } = await supabase.from("backups").select("id, created_at").order("created_at", { ascending: false }).limit(10);
+        if (err) throw err;
+        setBackups(data || []);
+      } catch (e) {
+        setError(true);
+      }
+    })();
+  }, []);
+
+  const downloadBackup = async (id) => {
+    try {
+      const { data, error: err } = await supabase.from("backups").select("data, created_at").eq("id", id).single();
+      if (err || !data) return;
+      const blob = new Blob([JSON.stringify(data.data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `otomatik-yedek-${data.created_at.slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {}
+  };
+
+  return (
+    <div className="card-surface rounded-2xl p-4 flex flex-col gap-2">
+      <p className="text-sm font-semibold flex items-center gap-1.5"><Clock size={15} /> Otomatik Yedekler</p>
+      <p className="text-xs text-[#8B8168]">
+        Sistem her hafta otomatik olarak bir yedek alır (son {backups?.length ?? "…"} yedek saklanıyor).
+        {db.lastAutoBackup ? ` Son otomatik yedek: ${fmtDateTime(db.lastAutoBackup)}.` : ""}
+      </p>
+      {error && <p className="text-xs text-[#B14A3A]">Yedek listesi alınamadı.</p>}
+      {backups && backups.length === 0 && <p className="text-xs text-[#8B8168]">Henüz otomatik yedek oluşmadı.</p>}
+      {backups && backups.length > 0 && (
+        <div className="flex flex-col gap-1.5 mt-1">
+          {backups.map((b) => (
+            <div key={b.id} className="flex items-center justify-between text-sm">
+              <span className="font-mono text-xs text-[#8B8168]">{fmtDateTime(b.created_at)}</span>
+              <button onClick={() => downloadBackup(b.id)} className="text-xs font-semibold px-2.5 py-1 rounded-lg flex items-center gap-1" style={{ background: "#E4EEF2", color: "#2F6F8F" }}>
+                <Download size={12} /> İndir
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SettingsTab({ db, mutate }) {
   const [name, setName] = useState(db.studio.name);
@@ -3093,6 +3275,8 @@ function SettingsTab({ db, mutate }) {
         {importStatus === "error" && <p className="text-xs text-[#B14A3A]">Dosya okunamadı veya geçersiz format — geçerli bir yedek dosyası seç.</p>}
       </div>
 
+      <AutoBackupsList db={db} />
+
       <div className="card-surface rounded-2xl p-4">
         <p className="text-sm font-semibold mb-1 flex items-center gap-1.5"><Clock size={15} /> Değişiklik Kaydı</p>
         <p className="text-xs text-[#8B8168] mb-3">Kim, ne zaman, ne ekledi veya sildi — en yeniden eskiye.</p>
@@ -3188,7 +3372,10 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [activeTab, setActiveTab] = useState("overview");
   const [syncing, setSyncing] = useState(false);
+  const [offline, setOffline] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const mutateChainRef = useRef(Promise.resolve());
+  const pendingQueueRef = useRef([]);
   const currentUserRef = useRef(null);
   useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
 
@@ -3202,9 +3389,27 @@ export default function App() {
       }
       d = migrateDB(d);
       setDb(d);
+      setLoading(false);
       // Bilinçli olarak oturum hatırlanmıyor: paylaşılan/ortak cihazlarda yanlış
       // kişi adına işlem yapılmasın diye her sayfa açılışında PIN ekranı gelir.
-      setLoading(false);
+
+      // Haftalık otomatik yedekleme (arka planda, sessizce) — son yedek 7+ gün önceyse yenisini al.
+      try {
+        const lastBackup = d.lastAutoBackup ? new Date(d.lastAutoBackup) : null;
+        const daysSince = lastBackup ? (Date.now() - lastBackup.getTime()) / 86400000 : Infinity;
+        if (daysSince >= 7) {
+          await supabase.from("backups").insert({ data: d });
+          const updated = { ...d, lastAutoBackup: new Date().toISOString() };
+          await saveDB(updated);
+          setDb(updated);
+          const { data: allBackups } = await supabase.from("backups").select("id, created_at").order("created_at", { ascending: false });
+          if (allBackups && allBackups.length > 8) {
+            for (const b of allBackups.slice(8)) await supabase.from("backups").delete().eq("id", b.id);
+          }
+        }
+      } catch (e) {
+        console.error("Otomatik yedekleme hatası", e);
+      }
     })();
   }, []);
 
@@ -3241,21 +3446,51 @@ export default function App() {
 
   // Her kayıt işlemi, ekrandaki eski kopya yerine depodaki EN GÜNCEL veriyi baz alır
   // ve işlemler sıraya alınır — böylece iki kişi aynı anda kaydetse bile biri diğerinin
-  // alakasız değişikliğini sessizce silmez.
+  // alakasız değişikliğini sessizce silmez. Kayıt internet/Supabase kopukluğu yüzünden
+  // başarısız olursa, değişiklik EKRANDA kalır ama arka planda bir kuyruğa alınır ve
+  // bağlantı geri gelince otomatik olarak tekrar gönderilir — kaybolmaz.
   const mutate = useCallback((updater) => {
     setSyncing(true);
     mutateChainRef.current = mutateChainRef.current
       .then(async () => {
-        let latest = await loadDB();
-        latest = latest ? migrateDB(latest) : seedDB();
-        const draft = JSON.parse(JSON.stringify(latest));
-        const next = updater(draft) || draft;
-        await saveDB(next);
+        const { ok, next } = await attemptMutation(updater);
         setDb(next);
+        if (!ok) {
+          pendingQueueRef.current.push(updater);
+          setPendingCount(pendingQueueRef.current.length);
+          setOffline(true);
+        }
       })
       .catch((e) => console.error("Kayıt hatası", e))
       .finally(() => setSyncing(false));
   }, []);
+
+  const flushQueue = useCallback(() => {
+    if (pendingQueueRef.current.length === 0) return;
+    setSyncing(true);
+    mutateChainRef.current = mutateChainRef.current
+      .then(async () => {
+        while (pendingQueueRef.current.length > 0) {
+          const queuedUpdater = pendingQueueRef.current[0];
+          const { ok, next } = await attemptMutation(queuedUpdater);
+          if (!ok) break;
+          pendingQueueRef.current.shift();
+          setPendingCount(pendingQueueRef.current.length);
+          setDb(next);
+        }
+        if (pendingQueueRef.current.length === 0) setOffline(false);
+      })
+      .catch((e) => console.error("Senkronizasyon hatası", e))
+      .finally(() => setSyncing(false));
+  }, []);
+
+  // Bağlantı geri geldiğinde ve periyodik olarak bekleyen değişiklikleri göndermeyi dene.
+  useEffect(() => {
+    const onOnline = () => flushQueue();
+    window.addEventListener("online", onOnline);
+    const retryInterval = setInterval(() => { if (pendingQueueRef.current.length > 0) flushQueue(); }, 20000);
+    return () => { window.removeEventListener("online", onOnline); clearInterval(retryInterval); };
+  }, [flushQueue]);
 
   const handleLogin = (staff) => { setCurrentUser(staff); setActiveTab("overview"); };
   const handleLogout = () => { setCurrentUser(null); };
@@ -3293,6 +3528,13 @@ export default function App() {
     <div className="studio-root min-h-screen">
       <StyleTag />
       <Sidebar tabs={tabs} activeTab={visibleTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} studioName={db.studio.name} syncing={syncing} />
+
+      {offline && (
+        <div className="md:ml-60 flex items-center justify-between gap-2 px-4 py-2 text-xs font-semibold flex-wrap" style={{ background: "#F5EDDA", color: "#A98330" }}>
+          <span className="flex items-center gap-1.5"><AlertTriangle size={13} /> Çevrimdışı — {pendingCount} değişiklik gönderilmeyi bekliyor. Bağlantı gelince otomatik gönderilecek.</span>
+          <button onClick={flushQueue} className="underline shrink-0">Şimdi Dene</button>
+        </div>
+      )}
 
       <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-[#E7DFC9] bg-[#FCFAF4] sticky top-0 z-30">
         <div>
