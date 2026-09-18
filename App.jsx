@@ -204,13 +204,17 @@ function daysBetweenInclusive(start, end) {
   return Math.round((e - s) / 86400000) + 1;
 }
 function addDays(dateStr, n) {
-  const d = new Date(dateStr + "T00:00:00");
-  d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + n);
+  const yy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
 }
 function getMonday(dateStr) {
-  const d = new Date(dateStr + "T00:00:00");
-  const jsDay = d.getDay();
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const jsDay = new Date(y, m - 1, d).getDay();
   const ourIndex = (jsDay + 6) % 7; // 0=Pazartesi
   return addDays(dateStr, -ourIndex);
 }
