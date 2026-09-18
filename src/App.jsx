@@ -102,13 +102,17 @@ function logActivity(d, currentUser, description) {
   if (d.activityLog.length > 500) d.activityLog = d.activityLog.slice(-500);
 }
 
+function showToast(message) {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("app-toast", { detail: message }));
+}
+
 function requestDeletion(mutate, currentUser, type, payload, description) {
   mutate((d) => {
     d.deletionRequests = d.deletionRequests || [];
     d.deletionRequests.push({ id: uid(), type, payload, description, requestedBy: currentUser.id, requestedByName: currentUser.name, createdAt: new Date().toISOString() });
     return d;
   });
-  if (typeof window !== "undefined" && window.alert) window.alert("Silme talebi yöneticiye gönderildi, onay bekleniyor.");
+  showToast("Silme talebi yöneticiye gönderildi, onay bekleniyor.");
 }
 
 // Bir derste yer açıldığında bekleme listesindeki üyeyi OTOMATİK almak yerine
@@ -326,6 +330,8 @@ function StyleTag() {
       }
       input:focus, select:focus, textarea:focus { outline:2px solid #3E6B52; outline-offset:1px; border-color:#3E6B52; }
       ::selection { background:#C9BFA4; }
+      @keyframes toastIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+      @keyframes modalIn { from { opacity:0; transform:scale(0.97) translateY(6px); } to { opacity:1; transform:scale(1) translateY(0); } }
     `}</style>
   );
 }
@@ -369,6 +375,32 @@ function ProgressRail({ used, total, small }) {
   );
 }
 
+function ToastHost() {
+  const [toasts, setToasts] = useState([]);
+
+  useEffect(() => {
+    const onToast = (e) => {
+      const id = uid();
+      setToasts((prev) => [...prev, { id, message: e.detail }]);
+      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3500);
+    };
+    window.addEventListener("app-toast", onToast);
+    return () => window.removeEventListener("app-toast", onToast);
+  }, []);
+
+  if (toasts.length === 0) return null;
+
+  return (
+    <div className="fixed bottom-20 md:bottom-6 left-0 right-0 z-[10000] flex flex-col items-center gap-2 px-4 pointer-events-none">
+      {toasts.map((t) => (
+        <div key={t.id} className="bg-[#20291F] text-[#F4F0E6] text-sm font-medium px-4 py-3 rounded-xl shadow-lg max-w-sm text-center" style={{ animation: "toastIn 0.25s ease-out" }}>
+          {t.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Modal({ title, onClose, children, footer, wide }) {
   useEffect(() => {
     const prevOverflow = document.body.style.overflow;
@@ -396,7 +428,7 @@ function Modal({ title, onClose, children, footer, wide }) {
       <div
         onClick={(e) => e.stopPropagation()}
         className="bg-[#FCFAF4] w-full rounded-2xl shadow-2xl"
-        style={{ maxWidth: wide ? 640 : 420, maxHeight: "85vh", display: "flex", flexDirection: "column" }}
+        style={{ maxWidth: wide ? 640 : 420, maxHeight: "85vh", display: "flex", flexDirection: "column", animation: "modalIn 0.18s ease-out" }}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#E7DFC9] shrink-0">
           <h3 className="font-display text-lg font-semibold">{title}</h3>
@@ -853,6 +885,19 @@ function OverviewTab({ db, mutate, isAdmin, currentUser, setActiveTab }) {
       <div>
         <h2 className="font-display text-xl font-semibold">Merhaba, {currentUser.name.split(" ")[0]}</h2>
         <p className="text-sm text-[#8B8168]">{new Date().toLocaleDateString("tr-TR", { weekday: "long", day: "numeric", month: "long" })}</p>
+      </div>
+
+      <div className="flex gap-2 overflow-x-auto scrollbar-thin -mx-1 px-1">
+        <button onClick={() => setActiveTab("members")} className="btn-primary shrink-0 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-1.5"><Plus size={15} /> Yeni Üye</button>
+        <button onClick={() => setActiveTab("attendance")} className="shrink-0 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-1.5" style={{ background: "#E7F0EA", color: "#3E6B52" }}><CalendarCheck size={15} /> Yoklama Al</button>
+        {isAdmin ? (
+          <button onClick={() => setActiveTab("schedule")} className="shrink-0 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-1.5" style={{ background: "#E4EEF2", color: "#2F6F8F" }}><CalendarDays size={15} /> Yeni Ders</button>
+        ) : (
+          <button onClick={() => setActiveTab("checkin")} className="shrink-0 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-1.5" style={{ background: "#E4EEF2", color: "#2F6F8F" }}><MapPin size={15} /> Giriş / Çıkış</button>
+        )}
+        {isAdmin && (
+          <button onClick={() => setActiveTab("finance")} className="shrink-0 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-1.5" style={{ background: "#F5EDDA", color: "#A98330" }}><Wallet size={15} /> Gider Ekle</button>
+        )}
       </div>
 
       {!isAdmin && (
@@ -1465,12 +1510,17 @@ function MembersTab({ db, mutate, isAdmin, currentUser }) {
             const totalOf = pkgs.reduce((s, p) => s + p.totalSessions, 0);
             const status = memberStatus(m, today);
             const statusMeta = MEMBER_STATUS_META[status];
+            const lastAttendance = db.attendance.filter((a) => a.memberId === m.id && (a.status === "attended" || a.status === "burned")).sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+            const initials = m.name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
             return (
               <button key={m.id} onClick={() => setSelectedId(m.id)} className="card-surface rounded-2xl p-4 text-left hover:border-[#B9AF8F] transition-colors">
-                <div className="flex items-center justify-between gap-3 mb-2">
-                  <div>
-                    <p className="font-medium flex items-center gap-2">{m.name} {status !== "active" && <Badge color={statusMeta.color} bg={statusMeta.bg}>{statusMeta.label}</Badge>}</p>
-                    {m.phone && <p className="text-xs text-[#8B8168]">{m.phone}</p>}
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold shrink-0" style={{ background: "#E4EEF2", color: "#2F6F8F" }}>{initials}</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium flex items-center gap-2 truncate">{m.name} {status !== "active" && <Badge color={statusMeta.color} bg={statusMeta.bg}>{statusMeta.label}</Badge>}</p>
+                    <p className="text-xs text-[#8B8168] truncate">
+                      {m.phone || "Telefon yok"}{lastAttendance ? ` · Son katılım: ${fmtDate(lastAttendance.date)}` : ""}
+                    </p>
                   </div>
                   <ChevronRight size={16} className="text-[#8B8168] shrink-0" />
                 </div>
@@ -3846,6 +3896,7 @@ export default function App() {
       </div>
 
       <BottomNav tabs={tabs} activeTab={visibleTab} setActiveTab={setActiveTab} />
+      <ToastHost />
     </div>
   );
 }
