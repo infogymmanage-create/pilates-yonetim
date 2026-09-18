@@ -921,6 +921,7 @@ const EXTRA_SUGGESTIONS = ["Diyet Danışmanlığı", "Vücut Analizi", "Beslenm
 function PackageFormModal({ onClose, onSave }) {
   const [name, setName] = useState("8 Seans Paketi");
   const [serviceType, setServiceType] = useState("Reformer Pilates");
+  const [customServiceType, setCustomServiceType] = useState("");
   const [totalSessions, setTotalSessions] = useState(8);
   const [totalPrice, setTotalPrice] = useState("");
   const [paidNow, setPaidNow] = useState("");
@@ -932,6 +933,7 @@ function PackageFormModal({ onClose, onSave }) {
   const total = Number(totalPrice) || 0;
   const paid = Math.min(Number(paidNow) || 0, total);
   const remainingDebt = Math.max(total - paid, 0);
+  const finalServiceType = serviceType === "Diğer" ? customServiceType.trim() : serviceType;
 
   const toggleSuggestion = (label) => setExtras((prev) => (prev.includes(label) ? prev.filter((e) => e !== label) : [...prev, label]));
   const addCustomExtra = () => {
@@ -943,7 +945,7 @@ function PackageFormModal({ onClose, onSave }) {
 
   const save = () => {
     const payments = paid > 0 ? [{ id: uid(), amount: paid, method: paymentMethod, date: purchaseDate }] : [];
-    onSave({ name: name.trim(), serviceType, totalSessions: Number(totalSessions), remainingSessions: Number(totalSessions), totalPrice: total, payments, purchaseDate, extras });
+    onSave({ name: name.trim(), serviceType: finalServiceType, totalSessions: Number(totalSessions), remainingSessions: Number(totalSessions), totalPrice: total, payments, purchaseDate, extras });
   };
 
   return (
@@ -952,7 +954,7 @@ function PackageFormModal({ onClose, onSave }) {
       onClose={onClose}
       footer={
         <button
-          disabled={!total || totalSessions < 1 || !name.trim()}
+          disabled={!total || totalSessions < 1 || !name.trim() || !finalServiceType}
           onClick={save}
           className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40"
         >
@@ -962,10 +964,16 @@ function PackageFormModal({ onClose, onSave }) {
     >
       <div className="flex flex-col gap-3">
         <Field label="Paket Türü">
-          <select value={serviceType} onChange={(e) => { setServiceType(e.target.value); setName(e.target.value === "Masaj" ? "5 Masaj Seansı" : "8 Seans Paketi"); }}>
+          <select value={serviceType} onChange={(e) => { setServiceType(e.target.value); setName(e.target.value === "Masaj" ? "5 Masaj Seansı" : e.target.value === "Diğer" ? "" : "8 Seans Paketi"); }}>
             {SERVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            <option value="Diğer">Diğer</option>
           </select>
         </Field>
+        {serviceType === "Diğer" && (
+          <Field label="Paket Türü Adı">
+            <input type="text" value={customServiceType} onChange={(e) => setCustomServiceType(e.target.value)} placeholder="Örn. Yoga, Grup Dersi..." />
+          </Field>
+        )}
         <Field label="Paket Adı (kampanya için serbest yazabilirsin)">
           <input list="package-name-suggestions" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Örn. 8 Seans Reformer + 1 Aylık Diyet" />
           <datalist id="package-name-suggestions">{PACKAGE_NAME_SUGGESTIONS.map((p) => <option key={p} value={p} />)}</datalist>
@@ -1631,8 +1639,10 @@ function MakeupsTab({ db, mutate, isAdmin, currentUser }) {
 /* ============================= DERS PROGRAMI ============================= */
 
 function ClassFormModal({ onClose, onSave, instructors, initialDay, initialSlot, weekStart, isAdmin, currentUser, initial }) {
+  const initialIsCustomType = initial?.serviceType && !SERVICE_TYPES.includes(initial.serviceType);
   const [title, setTitle] = useState(initial?.title || "Reformer Grup Dersi");
-  const [serviceType, setServiceType] = useState(initial?.serviceType || "Reformer Pilates");
+  const [serviceType, setServiceType] = useState(initialIsCustomType ? "Diğer" : (initial?.serviceType || "Reformer Pilates"));
+  const [customServiceType, setCustomServiceType] = useState(initialIsCustomType ? initial.serviceType : "");
   const [roomId, setRoomId] = useState(initial?.roomId || ROOMS[0].id);
   const [dayOfWeek, setDayOfWeek] = useState(initial ? initial.dayOfWeek : (initialDay != null ? initialDay : 0));
   const [timeSlot, setTimeSlot] = useState(initial?.timeSlot || initialSlot || TIME_SLOTS[0]);
@@ -1640,6 +1650,7 @@ function ClassFormModal({ onClose, onSave, instructors, initialDay, initialSlot,
   const [capacity, setCapacity] = useState(initial?.capacity || 5);
 
   const room = ROOMS.find((r) => r.id === roomId);
+  const finalServiceType = serviceType === "Diğer" ? customServiceType.trim() : serviceType;
 
   const handleRoomChange = (id) => {
     setRoomId(id);
@@ -1648,22 +1659,28 @@ function ClassFormModal({ onClose, onSave, instructors, initialDay, initialSlot,
   };
 
   const save = () => {
-    onSave({ title: title.trim(), serviceType, roomId, dayOfWeek, timeSlot, instructorId, capacity: Number(capacity), weekStart: initial?.weekStart || weekStart });
+    onSave({ title: title.trim(), serviceType: finalServiceType, roomId, dayOfWeek, timeSlot, instructorId, capacity: Number(capacity), weekStart: initial?.weekStart || weekStart });
   };
 
   return (
     <Modal
       title={initial ? "Dersi Düzenle" : "Yeni Ders Ekle"}
       onClose={onClose}
-      footer={<button disabled={!title.trim() || !instructorId} onClick={save} className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40">Kaydet</button>}
+      footer={<button disabled={!title.trim() || !instructorId || !finalServiceType} onClick={save} className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40">Kaydet</button>}
     >
       <div className="flex flex-col gap-3">
         <Field label="Ders Adı"><input type="text" value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
         <Field label="Hizmet Türü">
           <select value={serviceType} onChange={(e) => setServiceType(e.target.value)}>
             {SERVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            <option value="Diğer">Diğer</option>
           </select>
         </Field>
+        {serviceType === "Diğer" && (
+          <Field label="Hizmet Türü Adı">
+            <input type="text" value={customServiceType} onChange={(e) => setCustomServiceType(e.target.value)} placeholder="Örn. Yoga, Grup Dersi..." />
+          </Field>
+        )}
         <Field label="Oda">
           <select value={roomId} onChange={(e) => handleRoomChange(e.target.value)}>
             {ROOMS.map((r) => <option key={r.id} value={r.id}>{r.name} ({r.note})</option>)}
