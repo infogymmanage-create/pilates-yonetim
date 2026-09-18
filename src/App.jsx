@@ -6,7 +6,7 @@ import {
   CalendarCheck, UserCheck, Home, CreditCard, Phone, ChevronDown, Loader2,
   Navigation, CheckCircle2, XCircle, RefreshCcw, Gift, Briefcase, Award,
   MessageCircle, Snowflake, PlayCircle, PauseCircle, FileSpreadsheet,
-  PlaneTakeoff, CalendarDays, CalendarClock, Download, Sparkles, BarChart3, Upload
+  PlaneTakeoff, CalendarDays, CalendarClock, Download, Sparkles, BarChart3, Upload, Wrench
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -66,6 +66,7 @@ function migrateDB(d) {
   if (!d.deletionRequests) d.deletionRequests = [];
   if (!Array.isArray(d.spotAlerts)) d.spotAlerts = [];
   if (!Array.isArray(d.prospects)) d.prospects = [];
+  if (!Array.isArray(d.maintenanceTasks)) d.maintenanceTasks = [];
   if (!d.activityLog) d.activityLog = [];
   if (!d.taskDefinitions) d.taskDefinitions = [{ id: uid(), name: "Üye Fotoğrafı Gönderimi" }, { id: uid(), name: "Üye Videosu Gönderimi" }];
   if (!d.taskLogs) d.taskLogs = [];
@@ -600,6 +601,29 @@ function CelebrationsCard({ db }) {
   );
 }
 
+function MaintenanceAlertsCard({ db }) {
+  const today = todayISO();
+  const overdue = (db.maintenanceTasks || []).filter((t) => maintenanceNextDue(t) < today);
+  if (overdue.length === 0) return null;
+  return (
+    <div className="card-surface rounded-2xl p-4" style={{ borderLeft: "3px solid #A98330" }}>
+      <p className="text-sm font-semibold mb-3 flex items-center gap-1.5"><Wrench size={15} className="text-[#A98330]" /> Bakım Zamanı Geldi ({overdue.length})</p>
+      <div className="flex flex-col gap-1.5">
+        {overdue.map((t) => {
+          const room = ROOMS.find((r) => r.id === t.roomId);
+          return (
+            <div key={t.id} className="flex items-center justify-between text-sm">
+              <span>{t.title}{room ? ` · ${room.name}` : ""}</span>
+              <span className="font-mono text-xs text-[#A98330]">{fmtDate(maintenanceNextDue(t))}</span>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-xs text-[#8B8168] mt-2">Ayarlar → Ekipman & Oda Bakımı bölümünden "Yapıldı" işaretleyebilirsin.</p>
+    </div>
+  );
+}
+
 function SpotAlertsCard({ db, mutate }) {
   const alerts = db.spotAlerts || [];
   if (alerts.length === 0) return null;
@@ -858,6 +882,7 @@ function OverviewTab({ db, mutate, isAdmin, currentUser, setActiveTab }) {
 
       {isAdmin && <PendingDeletionsCard db={db} mutate={mutate} currentUser={currentUser} />}
       {isAdmin && <SpotAlertsCard db={db} mutate={mutate} />}
+      {isAdmin && <MaintenanceAlertsCard db={db} />}
       <NotesCard db={db} mutate={mutate} currentUser={currentUser} isAdmin={isAdmin} />
       <CelebrationsCard db={db} />
       <AlertsCard db={db} />
@@ -1794,7 +1819,9 @@ function ProspectsTab({ db, mutate, currentUser }) {
     setEditing(null);
   };
   const removeProspect = (id) => {
-    mutate((d) => { d.prospects = (d.prospects || []).filter((p) => p.id !== id); return d; });
+    const p = prospects.find((x) => x.id === id);
+    if (!window.confirm(`"${p?.name || "Bu aday"}" kaydını silmek istediğine emin misin?`)) return;
+    mutate((d) => { d.prospects = (d.prospects || []).filter((x) => x.id !== id); return d; });
   };
 
   return (
@@ -2437,12 +2464,16 @@ function FinanceTab({ db, mutate, currentUser }) {
     mutate((d) => { d.expenses.push({ id: uid(), ...exp }); return d; });
     setShowExpenseForm(false);
   };
-  const deleteExpense = (id) => mutate((d) => {
-    const e = d.expenses.find((x) => x.id === id);
-    d.expenses = d.expenses.filter((x) => x.id !== id);
-    logActivity(d, currentUser, `Gider silindi: ${e?.description || ""} (${fmtMoney(e?.amount || 0)})`);
-    return d;
-  });
+  const deleteExpense = (id) => {
+    const e = db.expenses.find((x) => x.id === id);
+    if (!window.confirm(`"${e?.description || "Bu gider"}" (${fmtMoney(e?.amount || 0)}) kaydını silmek istediğine emin misin?`)) return;
+    mutate((d) => {
+      const ex = d.expenses.find((x) => x.id === id);
+      d.expenses = d.expenses.filter((x) => x.id !== id);
+      logActivity(d, currentUser, `Gider silindi: ${ex?.description || ""} (${fmtMoney(ex?.amount || 0)})`);
+      return d;
+    });
+  };
   const addPayment = (pkgId, payment) => {
     mutate((d) => {
       const p = d.packages.find((x) => x.id === pkgId);
@@ -2708,25 +2739,33 @@ function InstructorDetail({ db, mutate, staffMember, onBack, currentUser }) {
     mutate((d) => { d.taskDefinitions = d.taskDefinitions || []; d.taskDefinitions.push({ id: uid(), name: newTaskName.trim() }); return d; });
     setNewTaskName("");
   };
-  const removeTaskDefinition = (id) => mutate((d) => {
-    const t = d.taskDefinitions.find((x) => x.id === id);
-    d.taskDefinitions = d.taskDefinitions.filter((x) => x.id !== id);
-    d.taskLogs = d.taskLogs.filter((l) => l.taskId !== id);
-    logActivity(d, currentUser, `Görev tanımı silindi: ${t?.name || ""}`);
-    return d;
-  });
+  const removeTaskDefinition = (id) => {
+    const t = db.taskDefinitions.find((x) => x.id === id);
+    if (!window.confirm(`"${t?.name || "Bu görev"}" görev tanımını silmek istediğine emin misin? Bu göreve ait tüm geçmiş kayıtlar da silinecek.`)) return;
+    mutate((d) => {
+      const td = d.taskDefinitions.find((x) => x.id === id);
+      d.taskDefinitions = d.taskDefinitions.filter((x) => x.id !== id);
+      d.taskLogs = d.taskLogs.filter((l) => l.taskId !== id);
+      logActivity(d, currentUser, `Görev tanımı silindi: ${td?.name || ""}`);
+      return d;
+    });
+  };
 
   const addNote = () => {
     if (!noteText.trim()) return;
     mutate((d) => { d.performanceNotes = d.performanceNotes || []; d.performanceNotes.push({ id: uid(), staffId: staffMember.id, type: noteType, text: noteText.trim(), date: todayISO() }); return d; });
     setNoteText("");
   };
-  const deleteNote = (id) => mutate((d) => {
-    const n = d.performanceNotes.find((x) => x.id === id);
-    d.performanceNotes = d.performanceNotes.filter((x) => x.id !== id);
-    logActivity(d, currentUser, `Performans notu silindi: ${staffMember.name} · "${n?.text || ""}"`);
-    return d;
-  });
+  const deleteNote = (id) => {
+    const n = db.performanceNotes.find((x) => x.id === id);
+    if (!window.confirm(`Bu performans notunu silmek istediğine emin misin? "${n?.text || ""}"`)) return;
+    mutate((d) => {
+      const pn = d.performanceNotes.find((x) => x.id === id);
+      d.performanceNotes = d.performanceNotes.filter((x) => x.id !== id);
+      logActivity(d, currentUser, `Performans notu silindi: ${staffMember.name} · "${pn?.text || ""}"`);
+      return d;
+    });
+  };
 
   const tasksInPeriod = db.taskLogs.filter((l) => l.staffId === staffMember.id && l.date.startsWith(periodPrefix));
   const doneCount = tasksInPeriod.filter((l) => l.done).length;
@@ -2854,13 +2893,19 @@ function StaffTab({ db, mutate, currentUser }) {
     setPinFor(null);
   };
   const addLeave = (staffId, data) => { mutate((d) => { d.leaveRecords.push({ id: uid(), staffId, ...data }); return d; }); setLeaveFor(null); };
-  const deleteLeave = (id) => mutate((d) => {
-    const l = d.leaveRecords.find((x) => x.id === id);
-    const s = d.staff.find((x) => x.id === l?.staffId);
-    d.leaveRecords = d.leaveRecords.filter((x) => x.id !== id);
-    logActivity(d, currentUser, `İzin kaydı silindi: ${s?.name || "Personel"} · ${l ? fmtDate(l.startDate) + " – " + fmtDate(l.endDate) : ""}`);
-    return d;
-  });
+  const deleteLeave = (id) => {
+    const l = db.leaveRecords.find((x) => x.id === id);
+    const s = db.staff.find((x) => x.id === l?.staffId);
+    const desc = l ? (l.type === "hourly" ? `${fmtDate(l.startDate)} (Saatlik, ${l.hours} saat)` : `${fmtDate(l.startDate)} – ${fmtDate(l.endDate)}`) : "";
+    if (!window.confirm(`${s?.name || "Bu personel"} için ${desc} izin kaydını silmek istediğine emin misin?`)) return;
+    mutate((d) => {
+      const rec = d.leaveRecords.find((x) => x.id === id);
+      const st = d.staff.find((x) => x.id === rec?.staffId);
+      d.leaveRecords = d.leaveRecords.filter((x) => x.id !== id);
+      logActivity(d, currentUser, `İzin kaydı silindi: ${st?.name || "Personel"} · ${rec ? fmtDate(rec.startDate) + " – " + fmtDate(rec.endDate) : ""}`);
+      return d;
+    });
+  };
 
   const recentCheckins = [...db.checkins].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 30);
   const punctuality = useMemo(() => computePunctuality(db, punctualityMonth), [db.checkins, db.classes, db.staff, punctualityMonth]);
@@ -3323,6 +3368,94 @@ function AutoBackupsList({ db }) {
   );
 }
 
+function maintenanceNextDue(task) {
+  return addDays(task.lastDoneDate || task.createdAt.slice(0, 10), task.intervalDays);
+}
+
+function MaintenanceFormModal({ onClose, onSave }) {
+  const [title, setTitle] = useState("");
+  const [roomId, setRoomId] = useState("none");
+  const [intervalDays, setIntervalDays] = useState(30);
+
+  return (
+    <Modal
+      title="Yeni Bakım Görevi"
+      onClose={onClose}
+      footer={<button disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), roomId, intervalDays: Number(intervalDays) })} className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40">Kaydet</button>}
+    >
+      <div className="flex flex-col gap-3">
+        <Field label="Görev Adı"><input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Örn. Masaj sedyesi bakımı" /></Field>
+        <Field label="Oda (opsiyonel)">
+          <select value={roomId} onChange={(e) => setRoomId(e.target.value)}>
+            <option value="none">Genel / Belirli bir oda değil</option>
+            {ROOMS.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Tekrar Sıklığı (gün)"><input type="number" min={1} value={intervalDays} onChange={(e) => setIntervalDays(e.target.value)} /></Field>
+      </div>
+    </Modal>
+  );
+}
+
+function MaintenanceSection({ db, mutate }) {
+  const [showForm, setShowForm] = useState(false);
+  const tasks = db.maintenanceTasks || [];
+
+  const addTask = (data) => {
+    mutate((d) => {
+      d.maintenanceTasks = d.maintenanceTasks || [];
+      d.maintenanceTasks.push({ id: uid(), ...data, lastDoneDate: null, createdAt: new Date().toISOString() });
+      return d;
+    });
+    setShowForm(false);
+  };
+  const markDone = (id) => mutate((d) => { const t = (d.maintenanceTasks || []).find((x) => x.id === id); if (t) t.lastDoneDate = todayISO(); return d; });
+  const removeTask = (id) => {
+    const t = tasks.find((x) => x.id === id);
+    if (!window.confirm(`"${t?.title || "Bu bakım görevi"}" görevini silmek istediğine emin misin?`)) return;
+    mutate((d) => { d.maintenanceTasks = (d.maintenanceTasks || []).filter((x) => x.id !== id); return d; });
+  };
+
+  const today = todayISO();
+  const sorted = [...tasks].sort((a, b) => new Date(maintenanceNextDue(a)) - new Date(maintenanceNextDue(b)));
+
+  return (
+    <div className="card-surface rounded-2xl p-4 flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold flex items-center gap-1.5"><Wrench size={15} /> Ekipman & Oda Bakımı</p>
+        <button onClick={() => setShowForm(true)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg flex items-center gap-1" style={{ background: "#E4EEF2", color: "#2F6F8F" }}><Plus size={12} /> Yeni Görev</button>
+      </div>
+      {sorted.length === 0 ? (
+        <p className="text-xs text-[#8B8168]">Henüz periyodik bir bakım görevi tanımlanmadı.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {sorted.map((t) => {
+            const due = maintenanceNextDue(t);
+            const overdue = due < today;
+            const room = ROOMS.find((r) => r.id === t.roomId);
+            return (
+              <div key={t.id} className="flex items-center justify-between gap-2 flex-wrap bg-[#F4F0E6] rounded-xl p-2.5">
+                <div>
+                  <p className="text-sm font-medium">{t.title}{room ? ` · ${room.name}` : ""}</p>
+                  <p className="text-xs" style={{ color: overdue ? "#B14A3A" : "#8B8168" }}>
+                    {overdue ? "Süresi geçti — " : "Sıradaki bakım: "}{fmtDate(due)}
+                    {t.lastDoneDate ? ` (son yapılan: ${fmtDate(t.lastDoneDate)})` : " (hiç yapılmadı)"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => markDone(t.id)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background: "#E7F0EA", color: "#3E6B52" }}>Yapıldı</button>
+                  <button onClick={() => removeTask(t.id)} className="text-[#8B8168] hover:text-[#B14A3A]"><Trash2 size={14} /></button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {showForm && <MaintenanceFormModal onClose={() => setShowForm(false)} onSave={addTask} />}
+    </div>
+  );
+}
+
 function SettingsTab({ db, mutate }) {
   const [name, setName] = useState(db.studio.name);
   const [address, setAddress] = useState(db.studio.address);
@@ -3425,6 +3558,8 @@ function SettingsTab({ db, mutate }) {
       </div>
 
       <AutoBackupsList db={db} />
+
+      <MaintenanceSection db={db} mutate={mutate} />
 
       <div className="card-surface rounded-2xl p-4">
         <p className="text-sm font-semibold mb-1 flex items-center gap-1.5"><Clock size={15} /> Değişiklik Kaydı</p>
